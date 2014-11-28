@@ -37,19 +37,23 @@ type OauthProxy struct {
 	clientSecret       string
 	SignInMessage      string
 	HtpasswdFile       *HtpasswdFile
-	serveMux           *http.ServeMux
+	serveMuxes         map[string]*http.ServeMux
 	PassBasicAuth      bool
 }
 
 func NewOauthProxy(opts *Options, validator func(string) bool) *OauthProxy {
 	login, _ := url.Parse("https://accounts.google.com/o/oauth2/auth")
 	redeem, _ := url.Parse("https://accounts.google.com/o/oauth2/token")
-	serveMux := http.NewServeMux()
-	for _, u := range opts.proxyUrls {
-		path := u.Path
-		u.Path = ""
-		log.Printf("mapping path %q => upstream %q", path, u)
-		serveMux.Handle(path, httputil.NewSingleHostReverseProxy(u))
+	serveMuxes := map[string]*http.ServeMux{}
+	for sub, urls := range opts.proxyUrls {
+		serveMux := http.NewServeMux()
+		serveMuxes[sub] = serveMux
+		for _, u := range urls {
+			path := u.Path
+			u.Path = ""
+			log.Printf("mapping path %q for %q => upstream %q", path, sub, u)
+			serveMux.Handle(path, httputil.NewSingleHostReverseProxy(u))
+		}
 	}
 	redirectUrl := opts.redirectUrl
 	redirectUrl.Path = oauthCallbackPath
@@ -73,7 +77,7 @@ func NewOauthProxy(opts *Options, validator func(string) bool) *OauthProxy {
 		oauthScope:         "profile email",
 		oauthRedemptionUrl: redeem,
 		oauthLoginUrl:      login,
-		serveMux:           serveMux,
+		serveMuxes:         serveMuxes,
 		redirectUrl:        redirectUrl,
 		PassBasicAuth:      opts.PassBasicAuth,
 	}
@@ -172,11 +176,17 @@ func jwtDecodeSegment(seg string) ([]byte, error) {
 	return base64.URLEncoding.DecodeString(seg)
 }
 
-func (p *OauthProxy) ClearCookie(rw http.ResponseWriter, req *http.Request) {
-	domain := strings.Split(req.Host, ":")[0]
+func (p *OauthProxy) Domain(req *http.Request) (sub, domain string) {
+	domain = strings.Split(req.Host, ":")[0] // strip the port (if any)
 	if p.CookieDomain != "" && strings.HasSuffix(domain, p.CookieDomain) {
+		sub = domain[:len(domain)-len(p.CookieDomain)]
 		domain = p.CookieDomain
 	}
+	return sub, domain
+}
+
+func (p *OauthProxy) ClearCookie(rw http.ResponseWriter, req *http.Request) {
+	_, domain := p.Domain(req)
 	cookie := &http.Cookie{
 		Name:     p.CookieKey,
 		Value:    "",
@@ -189,11 +199,7 @@ func (p *OauthProxy) ClearCookie(rw http.ResponseWriter, req *http.Request) {
 }
 
 func (p *OauthProxy) SetCookie(rw http.ResponseWriter, req *http.Request, val string) {
-
-	domain := strings.Split(req.Host, ":")[0] // strip the port (if any)
-	if p.CookieDomain != "" && strings.HasSuffix(domain, p.CookieDomain) {
-		domain = p.CookieDomain
-	}
+	_, domain := p.Domain(req)
 	cookie := &http.Cookie{
 		Name:     p.CookieKey,
 		Value:    signedCookieValue(p.CookieSeed, p.CookieKey, val),
@@ -283,7 +289,7 @@ func (p *OauthProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	if req.Header.Get("X-Real-IP") != "" {
 		remoteAddr += fmt.Sprintf(" (%q)", req.Header.Get("X-Real-IP"))
 	}
-	log.Printf("%s %s %s", remoteAddr, req.Method, req.URL.RequestURI())
+	log.Println(req.Header.Get("Host"), remoteAddr, req.Method, req.URL.RequestURI())
 
 	var ok bool
 	var user string
@@ -386,7 +392,18 @@ func (p *OauthProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		req.Header["X-Forwarded-Email"] = []string{email}
 	}
 
-	p.serveMux.ServeHTTP(rw, req)
+	sub, d := p.Domain(req)
+	sm := p.serveMuxes[""]
+	if m, ok := p.serveMuxes[sub]; ok {
+		sm = m
+	} else if m, ok = p.serveMuxes["*"]; ok {
+		sm = m
+	}
+	if sm == nil {
+		p.ErrorPage(rw, 404, "Page not found", "Invalid Host")
+		return
+	}
+	sm.ServeHTTP(rw, req)
 }
 
 func (p *OauthProxy) CheckBasicAuth(req *http.Request) (string, bool) {
