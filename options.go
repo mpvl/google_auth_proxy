@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -25,7 +26,7 @@ type Options struct {
 
 	// internal values that are set after config validation
 	redirectUrl *url.URL
-	proxyUrls   []*url.URL
+	proxyUrls   map[string][]*url.URL
 }
 
 func NewOptions() *Options {
@@ -57,7 +58,12 @@ func (o *Options) Validate() error {
 	}
 	o.redirectUrl = redirectUrl
 
+	o.proxyUrls = map[string][]*url.URL{}
 	for _, u := range o.Upstreams {
+		var sub string
+		if i := strings.IndexByte(u, '|'); i != -1 {
+			sub, u = u[:i], u[i+1:]
+		}
 		upstreamUrl, err := url.Parse(u)
 		if err != nil {
 			return fmt.Errorf("error parsing upstream=%q %s", upstreamUrl, err)
@@ -65,7 +71,7 @@ func (o *Options) Validate() error {
 		if upstreamUrl.Path == "" {
 			upstreamUrl.Path = "/"
 		}
-		o.proxyUrls = append(o.proxyUrls, upstreamUrl)
+		o.proxyUrls[sub] = append(o.proxyUrls[sub], upstreamUrl)
 	}
 
 	return nil
