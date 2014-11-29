@@ -90,7 +90,7 @@ func (p *OauthProxy) GetLoginURL(redirectUrl string) string {
 	params.Add("scope", p.oauthScope)
 	params.Add("client_id", p.clientID)
 	params.Add("response_type", "code")
-	if strings.HasPrefix(redirectUrl, "/") {
+	if redirectUrl != "" {
 		params.Add("state", redirectUrl)
 	}
 	return fmt.Sprintf("%s?%s", p.oauthLoginUrl, params.Encode())
@@ -279,6 +279,13 @@ func (p *OauthProxy) GetRedirect(req *http.Request) (string, error) {
 	if redirect == "" {
 		redirect = "/"
 	}
+	if sub, _ := p.Domain(req); sub != "" {
+		u := *req.URL
+		u.Scheme = "https"
+		u.Host = sub + p.CookieDomain
+		u.Path = redirect
+		redirect = u.String()
+	}
 
 	return redirect, err
 }
@@ -289,7 +296,7 @@ func (p *OauthProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	if req.Header.Get("X-Real-IP") != "" {
 		remoteAddr += fmt.Sprintf(" (%q)", req.Header.Get("X-Real-IP"))
 	}
-	log.Println(req.Header.Get("Host"), remoteAddr, req.Method, req.URL.RequestURI())
+	log.Println(req.Host, req.Header.Get("Host"), remoteAddr, req.Method, req.URL.RequestURI())
 
 	var ok bool
 	var user string
@@ -345,15 +352,14 @@ func (p *OauthProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			return
 		}
 
-		redirect := req.Form.Get("state")
-		if redirect == "" {
-			redirect = "/"
-		}
-
 		// set cookie, or deny
 		if p.Validator(email) {
 			log.Printf("%s authenticating %s completed", remoteAddr, email)
 			p.SetCookie(rw, req, email)
+			redirect := req.Form.Get("state")
+			if redirect == "" {
+				redirect = "/"
+			}
 			http.Redirect(rw, req, redirect, 302)
 			return
 		} else {
